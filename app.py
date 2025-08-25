@@ -1,43 +1,42 @@
 import streamlit as st
-from pydrive.auth import GoogleAuth
-from pydrive.drive import GoogleDrive
+import os
+import PyPDF2
+import docx
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 from transformers import pipeline
-import PyPDF2
-import docx
 
-# ==== AUTENTICACIÓN GOOGLE DRIVE ====
+# ==== CONFIGURACIÓN ====
+CARPETA_DOCS = "documentos"
+os.makedirs(CARPETA_DOCS, exist_ok=True)
+
 st.set_page_config(page_title="Chat con tus documentos", layout="wide")
 st.title("📖 Chat con tus documentos (multiusuario)")
 
-gauth = GoogleAuth()
-gauth.LocalWebserverAuth()  # Esto abrirá el navegador para autenticar
-drive = GoogleDrive(gauth)
-
 # ==== FUNCIONES DE LECTURA DE ARCHIVOS ====
-def leer_txt(file):
-    return file.read().decode("utf-8")
+def leer_txt(file_path):
+    with open(file_path, "r", encoding="utf-8") as f:
+        return f.read()
 
-def leer_pdf(file):
-    reader = PyPDF2.PdfReader(file)
+def leer_pdf(file_path):
     texto = ""
-    for page in reader.pages:
-        texto += page.extract_text() + "\n"
+    with open(file_path, "rb") as f:
+        reader = PyPDF2.PdfReader(f)
+        for page in reader.pages:
+            texto += page.extract_text() + "\n"
     return texto
 
-def leer_docx(file):
-    doc = docx.Document(file)
-    texto = "\n".join([p.text for p in doc.paragraphs])
-    return texto
+def leer_docx(file_path):
+    doc = docx.Document(file_path)
+    return "\n".join([p.text for p in doc.paragraphs])
 
-def cargar_archivo(file):
-    if file.name.endswith(".txt"):
-        return leer_txt(file)
-    elif file.name.endswith(".pdf"):
-        return leer_pdf(file)
-    elif file.name.endswith(".doc") or file.name.endswith(".docx"):
-        return leer_docx(file)
+def cargar_archivo(file_path):
+    if file_path.endswith(".txt"):
+        return leer_txt(file_path)
+    elif file_path.endswith(".pdf"):
+        return leer_pdf(file_path)
+    elif file_path.endswith(".doc") or file_path.endswith(".docx"):
+        return leer_docx(file_path)
     else:
         return None
 
@@ -73,27 +72,26 @@ if rol == "Administrador":
 
         uploaded_file = st.file_uploader("Sube tus archivos (.txt, .pdf, .docx)", type=["txt", "pdf", "doc", "docx"])
         if uploaded_file:
-            contenido = cargar_archivo(uploaded_file)
-            if contenido:
-                gfile = drive.CreateFile({'title': uploaded_file.name})
-                gfile.SetContentString(contenido)
-                gfile.Upload()
-                st.success(f"Archivo '{uploaded_file.name}' subido y guardado permanentemente en Google Drive!")
-            else:
-                st.error("Formato no soportado")
+            file_path = os.path.join(CARPETA_DOCS, uploaded_file.name)
+
+            with open(file_path, "wb") as f:
+                f.write(uploaded_file.getbuffer())
+
+            st.success(f"Archivo '{uploaded_file.name}' guardado en carpeta local ✅")
+            st.info("👉 Recuerda hacer `git add . && git commit && git push` para guardarlo en GitHub.")
     else:
         st.sidebar.error("❌ Clave incorrecta")
 
 # ==== USUARIO ====
 st.header("📄 Consultar documentos")
 
-# Listar todos los archivos de Google Drive
-file_list = drive.ListFile({'q': "'root' in parents and trashed=false"}).GetList()
-if not file_list:
-    st.warning("⚠️ No hay documentos en Drive. Espera que el administrador suba archivos.")
+archivos = [os.path.join(CARPETA_DOCS, f) for f in os.listdir(CARPETA_DOCS)]
+
+if not archivos:
+    st.warning("⚠️ No hay documentos. Espera que el administrador suba archivos y los sincronice con GitHub.")
 else:
-    documentos = [f.GetContentString() for f in file_list]
-    nombres = [f['title'] for f in file_list]
+    documentos = [cargar_archivo(a) for a in archivos if cargar_archivo(a)]
+    nombres = [os.path.basename(a) for a in archivos]
 
     # Crear embeddings
     if "modelo_embeddings" not in st.session_state:
@@ -116,9 +114,16 @@ else:
         )
     generador = st.session_state["generador"]
 
+    # Selección de documentos (opcional)
+    seleccionados = st.multiselect("📂 Selecciona documentos para consultar:", nombres, default=nombres)
+
+    documentos_filtrados = [documentos[i] for i in range(len(nombres)) if nombres[i] in seleccionados]
+    embeddings_filtrados = crear_embeddings(documentos_filtrados, modelo_embeddings)
+
     # Pregunta del usuario
     pregunta = st.text_input("❓ Escribe tu pregunta aquí:")
-    if pregunta:
-        respuesta = responder_pregunta(pregunta, documentos, embeddings, modelo_embeddings, generador)
+    if pregunta and documentos_filtrados:
+        respuesta = responder_pregunta(pregunta, documentos_filtrados, embeddings_filtrados, modelo_embeddings, generador)
         st.subheader("🧠 Respuesta:")
         st.write(respuesta)
+
